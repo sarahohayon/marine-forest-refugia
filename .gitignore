@@ -1,0 +1,8 @@
+.Rhistory
+.RData
+.Rproj.user/
+R/analyses_files/
+R/*.html
+outputs/
+__pycache__/
+.DS_Store
