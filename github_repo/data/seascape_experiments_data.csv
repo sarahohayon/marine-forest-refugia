@@ -1,0 +1,14 @@
+Date,Treatment,Habitat,Dominent_algae,Transplanted_algae,Habitat_complexity,Camera_ID,File_Number,Time,Species,Max_n,Activity,Guild,
+13/06/2024,Control,Marine_forest,Sargassum.vulgare,Sargassum.vulgare,1,A,GH036340,7:44,Siganus sp.,6,Swimming,Herbivore,
+13/06/2024,Translocated,Rocky_reef,Terf,Sargassum.vulgare,1.5,A,GH075897,10:59,Siganus sp.,7,Eating,Herbivore,eating both transplanted and local alga
+13/06/2024,Translocated,Rocky_reef,Terf,Sargassum.vulgare,3,B,GH066176,10:05,Siganus sp.,47,Eating,Herbivore,eating but not the transplanted alga
+19/06/2024,Control,Marine_forest,Gongolaria.rayssiae,Gongolaria.rayssiae,1,A,GX024984,2:26,Siganus sp.,11,Swimming,Herbivore,
+19/06/2024,Translocated,Rocky_reef,Terf,Gongolaria.rayssiae,3,A,GH056342,4:11,Siganus sp.,27,Eating,Herbivore,eating but not the transplanted alga
+19/06/2024,Translocated,Rocky_reef,Terf,Gongolaria.rayssiae,3,B,GH026181,6:11,Siganus sp.,16,Eating,Herbivore,eating but not the transplanted alga
+22/04/2025,Translocated,Rocky_reef,Terf,Sargassum_Gongolaria,3,A,GX032014,8:58,Siganus sp.,21,Eating,Herbivore,
+22/04/2025,Translocated,Rocky_reef,Terf,Sargassum_Gongolaria,3,B,GX30490,15:53,Siganus sp.,19,Eating,Herbivore,
+29/04/2025,Control,Marine_forest,Gongolaria.rayssiae,Sargassum_Gongolaria,1,A,GX034474,3:49,Siganus sp.,4,Swimming,Herbivore,
+29/04/2025,Control,Marine_forest,Gongolaria.rayssiae,Sargassum_Gongolaria,1,B,NA,NA,Siganus sp.,0,NA,Herbivore,
+29/04/2025,Translocated,Rocky_reef,Terf,Sargassum_Gongolaria,3,A,GH046427,5:13,Siganus sp.,36,Eating,Herbivore,
+29/04/2025,Translocated,Rocky_reef,Terf,Sargassum_Gongolaria,3,B,GH020491,20:16,Siganus sp.,45,Eating,Herbivore,
+29/04/2025,Translocated,Rocky_reef,Terf,Sargassum_Gongolaria,3,C,GX022616,4:41,Siganus sp.,35,Eating,Herbivore,
