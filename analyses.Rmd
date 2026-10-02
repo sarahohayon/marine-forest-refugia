@@ -1,0 +1,733 @@
+---
+title: "Low-complexity reefs as refugia for Mediterranean marine forests: analyses and figures"
+author: "Sarah Ohayon"
+date: "October 2026"
+output: html_document
+---
+
+Analyses for the revision of MERE-D-26-01577. The models here replace the ones in
+`UVC_Data.Rmd` and `2025_07_27.Rmd`: site is now a random effect, depth is included as
+a covariate, and the grazing model accounts for transect and space.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+# paths are relative to this file (R/); data in ../data, figures written to ../figures
+data_dir <- file.path("..", "data")
+fig_dir  <- file.path("..", "figures")
+dir.create(fig_dir, showWarnings = FALSE)
+set.seed(42)
+```
+
+```{r libraries}
+library(tidyverse)
+library(mgcv)
+library(ggpubr)
+library(patchwork)
+```
+
+```{r plot style}
+# ---- Colours ----
+algae_cols <- c(
+  "Gongolaria" = "#F9A602",
+  "Sargassum"  = "#B1560f"
+)
+
+grazing_cols <- c(
+  "Intact"          = "#009E73",
+  "Partially eaten" = "#E69F00",
+  "Eaten"           = "#b5651d"
+)
+
+treatment_cols <- c(
+  "Control"      = "#598BAF",
+  "Translocated" = "#29AB87"
+)
+
+# ---- Theme ----
+# the theme I use for the paper figures, kept in one place so all the panels match
+theme_paper <- theme_bw(base_size = 16) +
+  theme(
+    axis.title.x = element_text(margin = margin(t = 12)),
+    axis.title.y = element_text(margin = margin(r = 12)),
+    axis.text.x  = element_text(size = 14, color = "black"),
+    axis.text.y  = element_text(size = 14, color = "black"),
+    axis.line    = element_line(color = "black", linewidth = 0.5),
+    axis.ticks   = element_line(color = "black", linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = "grey85", linewidth = 0.5),
+    legend.position  = "right"
+  )
+
+# the stats label that goes in the corner of each model panel
+gam_label <- function(model, term = 1) {
+  st    <- summary(model)$s.table
+  p     <- st[term, "p-value"]
+  p_str <- if (p < 0.001) "p < 0.001" else paste0("p = ", formatC(p, 3, format = "f"))
+  stat  <- if ("F" %in% colnames(st)) "F" else "χ²"
+  paste0(
+    "edf = ",  formatC(st[term, "edf"], 2, format = "f"),
+    "\n", stat, " = ", formatC(st[term, ncol(st) - 1], 1, format = "f"),
+    "\n", p_str,
+    "\ndev. explained = ", formatC(100 * summary(model)$dev.expl, 1, format = "f"), "%"
+  )
+}
+
+# put the legend inside the panel instead of stealing width beside it.
+# ggplot2 renamed the argument at 3.5.0, so handle both.
+legend_inside <- function(x, y) {
+  box <- list(
+    legend.background = element_rect(fill = alpha("white", 0.7), color = NA),
+    legend.key        = element_rect(fill = NA, color = NA),
+    legend.title      = element_text(size = 13),
+    legend.text       = element_text(size = 12)
+  )
+  if (utils::packageVersion("ggplot2") >= "3.5.0") {
+    do.call(theme, c(list(legend.position = "inside",
+                          legend.position.inside = c(x, y)), box))
+  } else {
+    do.call(theme, c(list(legend.position = c(x, y)), box))
+  }
+}
+```
+
+```{r read data}
+fish_algae_data <- read.csv(file.path(data_dir, "fish_algae_data.csv"))
+
+Algea_transect_2025_04_19 <- read.csv(file.path(data_dir, "2025_04_19_Algae_transect.csv"))
+Algea_transect_2025_04_29 <- read.csv(file.path(data_dir, "2025_04_29_Algae_transect.csv"))
+complexity_2025_04_29     <- read.csv(file.path(data_dir, "2025_04_29_complexity_layer.csv"))
+
+# distance from complex reef, sampled from the roughness layer in QGIS/python
+# (see distance_from_complex_reef.py)
+grazing_distance <- read.csv(file.path(data_dir, "grazing_distance_to_reef.csv"))
+
+seascape_experiments <- read.csv(file.path(data_dir, "seascape_experiments_data.csv"))
+maxn_experiments     <- read.csv(file.path(data_dir, "MaxN_seascape_experiments.csv"))
+```
+
+
+# 0. Figure 5 - macroalgal cover across complex reef edges (2010 surveys)
+
+Percent cover of turf and canopy-forming macroalgae along distance gradients from the edge
+of structurally complex reef at Carmel Head and Achziv. Weighted GAMs (weights = 1/SE^2)
+are fitted per site.
+
+```{r figure 5}
+cover_2010 <- read.csv(file.path(data_dir, "shikmona_achziv_2010.csv"), check.names = FALSE) %>%
+  rename_with(str_trim) %>%
+  mutate(Site = recode(Site, "Shikmona" = "Carmel Head"),
+         Site = factor(Site, levels = c("Carmel Head", "Achziv")),
+         Algae_type = factor(Algae_type, levels = c("Turf", "Canopy")),
+         Distance_num = as.numeric(Distance),
+         SE_safe = ifelse(SE == 0, min(SE[SE > 0], na.rm = TRUE), SE),   # avoid infinite weights
+         weight = 1 / SE_safe^2)
+
+cover_cols <- c("Turf" = "#117799", "Canopy" = "#cc8000")
+
+cover_panel <- function(site) {
+  d   <- filter(cover_2010, Site == site)
+  m   <- gam(Percent_cover ~ Algae_type + s(Distance_num, by = Algae_type, k = 5),
+             data = d, weights = weight, method = "REML")
+  nd  <- expand.grid(Distance_num = seq(min(d$Distance_num), max(d$Distance_num), length.out = 200),
+                     Algae_type = levels(d$Algae_type))
+  pr  <- predict(m, newdata = nd, se.fit = TRUE)
+  nd  <- mutate(nd, fit = pr$fit, lwr = fit - 1.96 * pr$se.fit, upr = fit + 1.96 * pr$se.fit,
+                Site = site)
+  ggplot() +
+    geom_ribbon(data = nd, aes(Distance_num, ymin = lwr, ymax = upr, fill = Algae_type),
+                alpha = 0.30, colour = NA) +
+    geom_line(data = nd, aes(Distance_num, fit, colour = Algae_type), linewidth = 1.4) +
+    geom_point(data = d, aes(Distance_num, Percent_cover, colour = Algae_type), size = 2.8, alpha = 0.9) +
+    facet_wrap(~ Site) +
+    scale_x_continuous(breaks = sort(unique(d$Distance_num))) +
+    scale_colour_manual(values = cover_cols) + scale_fill_manual(values = cover_cols) +
+    scale_y_continuous(limits = c(-10, 115), expand = expansion(mult = c(0.02, 0.05))) +
+    labs(x = "Distance from structurally complex reef edge (m)", y = "Percent cover (%)",
+         colour = "Algae type", fill = "Algae type") +
+    theme_bw(base_size = 16) +
+    theme(panel.grid = element_blank(),
+          axis.line = element_line(colour = "black", linewidth = 0.5),
+          axis.ticks = element_line(colour = "black", linewidth = 0.5),
+          strip.background = element_rect(fill = "grey95", colour = "black"),
+          strip.text = element_text(face = "bold"),
+          legend.position = "bottom")
+}
+
+fig5 <- (cover_panel("Carmel Head") / cover_panel("Achziv")) +
+  plot_layout(guides = "collect") + plot_annotation(tag_levels = "a") &
+  theme(legend.position = "bottom", plot.tag = element_text(face = "bold"))
+fig5
+ggsave(file.path(fig_dir, "Fig5_cover_distance.png"), fig5, width = 8, height = 8, dpi = 400)
+```
+
+# 1. Fish community and macroalgae along the complexity gradient
+
+Reviewers asked for the transects to be treated as nested within sites and repeated over
+seasons, and for depth to be tested as a covariate. Site is added as a random effect and
+sampling period as a fixed factor with three levels.
+
+```{r prepare uvc data}
+fish_algae_data <- fish_algae_data %>%
+  mutate(site_name = as.factor(site_name),
+         season    = as.factor(season),
+         period    = as.factor(paste(season, year, sep = "_")),
+         log_biomass   = log10(Biomass + 0.01),
+         log_abundance = log10(Abundance + 1))
+
+table(fish_algae_data$period)
+table(fish_algae_data$habitat)
+```
+
+```{r biomass models}
+# published model - complexity only
+gam_biomass_published <- gam(log_biomass ~ s(mean_complexity, bs = "tp", k = 3),
+                             data = fish_algae_data, family = "gaussian", method = "REML")
+
+# with site as a random effect and sampling period
+gam_biomass_site <- gam(log_biomass ~ s(mean_complexity, bs = "tp", k = 5) + period +
+                          s(site_name, bs = "re"),
+                        data = fish_algae_data, family = "gaussian", method = "REML")
+
+# adding depth
+gam_biomass_depth <- gam(log_biomass ~ s(mean_complexity, bs = "tp", k = 5) + s(depth, bs = "tp", k = 5) +
+                           period + s(site_name, bs = "re"),
+                         data = fish_algae_data, family = "gaussian", method = "REML")
+
+gam_biomass_null <- gam(log_biomass ~ period + s(site_name, bs = "re"),
+                        data = fish_algae_data, family = "gaussian", method = "REML")
+
+summary(gam_biomass_depth)
+AIC(gam_biomass_published, gam_biomass_site, gam_biomass_depth, gam_biomass_null)
+
+# is the complexity effect independent of depth?
+concurvity(gam_biomass_depth, full = FALSE)$estimate
+```
+
+```{r abundance and richness models}
+gam_abundance_depth <- gam(log_abundance ~ s(mean_complexity, bs = "tp", k = 5) + s(depth, bs = "tp", k = 5) +
+                             period + s(site_name, bs = "re"),
+                           data = fish_algae_data, family = "gaussian", method = "REML")
+gam_abundance_null  <- gam(log_abundance ~ period + s(site_name, bs = "re"),
+                           data = fish_algae_data, family = "gaussian", method = "REML")
+
+gam_richness_depth <- gam(Richness ~ s(mean_complexity, bs = "tp", k = 5) + s(depth, bs = "tp", k = 5) +
+                            period + s(site_name, bs = "re"),
+                          data = fish_algae_data, family = "gaussian", method = "REML")
+gam_richness_null  <- gam(Richness ~ period + s(site_name, bs = "re"),
+                          data = fish_algae_data, family = "gaussian", method = "REML")
+
+summary(gam_abundance_depth)
+summary(gam_richness_depth)
+AIC(gam_abundance_depth, gam_abundance_null)
+AIC(gam_richness_depth, gam_richness_null)
+```
+
+```{r algae height model}
+gam_algae_depth <- gam(mean_algae_height ~ s(mean_complexity, bs = "tp", k = 5) + s(depth, bs = "tp", k = 5) +
+                         period + s(site_name, bs = "re"),
+                       data = fish_algae_data, family = "gaussian", method = "REML")
+gam_algae_null  <- gam(mean_algae_height ~ period + s(site_name, bs = "re"),
+                       data = fish_algae_data, family = "gaussian", method = "REML")
+
+summary(gam_algae_depth)
+AIC(gam_algae_depth, gam_algae_null)
+concurvity(gam_algae_depth, full = FALSE)$estimate
+```
+
+```{r habitat summary}
+# means per habitat, for the results text
+uvc_summary <- fish_algae_data %>%
+  group_by(habitat) %>%
+  summarise(n = n(),
+            complexity = mean(mean_complexity),
+            biomass = mean(Biomass), biomass_sd = sd(Biomass),
+            abundance = mean(Abundance), abundance_sd = sd(Abundance),
+            richness = mean(Richness), richness_sd = sd(Richness),
+            algae_height = mean(mean_algae_height), algae_height_sd = sd(mean_algae_height))
+
+as.data.frame(uvc_summary)
+```
+
+```{r figure 7}
+# partial effect of complexity, with depth at its mean and the site effect left out
+gam_effect <- function(model, data, yvar, ylab, corner = c("left", "right")) {
+  # which top corner the stats label sits in - panel d is hidden by the points
+  # and the trend line on the left, so it takes corner = "right"
+  corner <- match.arg(corner)
+  lab_x  <- if (corner == "left") -Inf else Inf
+  lab_h  <- if (corner == "left") -0.08 else 1.08
+  nd <- data.frame(
+    mean_complexity = seq(min(data$mean_complexity), max(data$mean_complexity), length.out = 200),
+    depth     = mean(data$depth, na.rm = TRUE),
+    period    = factor(levels(data$period)[1],    levels = levels(data$period)),
+    site_name = factor(levels(data$site_name)[1], levels = levels(data$site_name))
+  )
+  pr <- predict(model, newdata = nd, se.fit = TRUE, exclude = "s(site_name)")
+  nd$fit <- pr$fit
+  nd$lwr <- pr$fit - 1.96 * pr$se.fit
+  nd$upr <- pr$fit + 1.96 * pr$se.fit
+
+  ggplot(data, aes(x = mean_complexity, y = .data[[yvar]])) +
+    geom_point(size = 2, alpha = 0.7) +
+    geom_ribbon(data = nd, aes(x = mean_complexity, ymin = lwr, ymax = upr),
+                inherit.aes = FALSE, fill = "#598BAF", alpha = 0.18) +
+    geom_line(data = nd, aes(x = mean_complexity, y = fit),
+              inherit.aes = FALSE, color = "#598BAF", linewidth = 1.4) +
+    annotate("text", x = lab_x, y = Inf, label = gam_label(model),
+             hjust = lab_h, vjust = 1.15, size = 4.2, lineheight = 0.95, color = "black") +
+    labs(x = "Visual complexity (0-5)", y = ylab) +
+    theme_paper
+}
+
+p_biomass   <- gam_effect(gam_biomass_depth,   fish_algae_data, "log_biomass",
+                          expression("Fish biomass (log"[10]*" kg/150 m"^2*")"))
+p_abundance <- gam_effect(gam_abundance_depth, fish_algae_data, "log_abundance",
+                          expression("Fish abundance (log"[10]*" ind./150 m"^2*")"))
+p_richness  <- gam_effect(gam_richness_depth,  fish_algae_data, "Richness",
+                          expression("Species richness (species/150 m"^2*")"))
+p_algae     <- gam_effect(gam_algae_depth,     fish_algae_data, "mean_algae_height",
+                          "Mean macroalgal height (cm)", corner = "right")
+
+# (e) share of fish biomass made up by rabbitfish, high- vs low-complexity habitat
+fish_raw <- read.csv(file.path(data_dir, "bat_galim_fish_2024_2025_analysis.csv"))
+species_ab <- read.csv(file.path(data_dir, "species_a_b.csv"))
+siganus_share <- fish_raw %>%
+  left_join(species_ab, by = "species") %>%
+  mutate(weight = new_a * length^new_b * abundance) %>%   # g; length-weight a, b from FishBase
+  filter(habitat != "artificial.rock") %>%
+  mutate(habitat = recode(habitat, "complex.rock" = "High complexity",
+                          "macroalgal.beds" = "Low complexity"),
+         group = ifelse(grepl("Siganus", species, ignore.case = TRUE), "Siganus spp.", "Other fish")) %>%
+  group_by(habitat, group) %>%
+  summarise(mean_weight_kg = mean(weight / 1000, na.rm = TRUE), .groups = "drop") %>%
+  group_by(habitat) %>%
+  mutate(percent = mean_weight_kg / sum(mean_weight_kg) * 100)
+as.data.frame(siganus_share)
+
+p_siganus <- ggplot(siganus_share, aes(x = "", y = percent, fill = group)) +
+  geom_col(width = 1, colour = "white") +
+  coord_polar(theta = "y") +
+  facet_wrap(~ habitat) +
+  geom_text(aes(label = paste0(group, "
+ ", round(percent, 1), "%")),
+            position = position_stack(vjust = 0.65), size = 4.5, lineheight = 0.9) +
+  scale_fill_manual(values = c("Siganus spp." = "#2a8e9d", "Other fish" = "#bdbdbd")) +
+  theme_void(base_size = 16) +
+  theme(legend.position = "none", strip.text = element_text(size = 14, margin = margin(t = 4, b = 4)),
+        panel.spacing = unit(1.2, "lines"))
+
+fig7 <- ggarrange(ggarrange(p_biomass, p_abundance, p_richness, p_algae,
+                            ncol = 2, nrow = 2, labels = c("a", "b", "c", "d")),
+                  ggarrange(p_siganus, labels = "e"),
+                  ncol = 1, heights = c(2, 0.9))
+fig7
+ggsave(file.path(fig_dir, "Fig7_fish_algae_complexity.png"), fig7, width = 12, height = 13.5, dpi = 400, bg = "white")
+
+#ggsave("Fig7_fish_algae_complexity.pdf", fig7, width = 12, height = 9, dpi = 400)
+```
+
+
+# 2. Grazing status along the two algae transects
+
+The two transects are joined as before, but the model now includes transect as a fixed
+factor and a smooth of position to account for the fact that neighbouring plants along a
+transect are not independent. Distance from the nearest structurally complex reef is
+added as a predictor.
+
+```{r prepare grazing data}
+complexity_2025_04_29 <- complexity_2025_04_29 %>%
+  dplyr::select(filename, rvalue_1)
+
+Algea_transect_2025_04_29_full <- Algea_transect_2025_04_29 %>%
+  left_join(complexity_2025_04_29, by = "filename") %>%
+  rename(height_cm = algae_height) %>%
+  mutate(sample = 2)
+
+Algea_transect_2025_04_19 <- Algea_transect_2025_04_19 %>%
+  rename(algae_type = algea_type) %>%
+  dplyr::select(-HubDist) %>%
+  mutate(sample = 1)
+
+# a few algae_type entries have a trailing space - trim before filtering
+algae_joined_trim <- function(x) mutate(x, across(c(algae_type, Eaten_whole), trimws))
+Algea_transect_2025_04_19      <- algae_joined_trim(Algea_transect_2025_04_19)
+Algea_transect_2025_04_29_full <- algae_joined_trim(Algea_transect_2025_04_29_full)
+
+algae_joined <- bind_rows(Algea_transect_2025_04_19, Algea_transect_2025_04_29_full)
+
+algae_joined <- algae_joined %>%
+  left_join(grazing_distance %>% dplyr::select(filename, sample, itm_x, itm_y, dist_complex_reef),
+            by = c("filename", "sample"))
+
+grazing_status <- algae_joined %>%
+  mutate(height_cm = suppressWarnings(as.numeric(height_cm))) %>%
+  filter(!is.na(height_cm)) %>%
+  filter(algae_type %in% c("Gongolaria", "Sargassum")) %>%
+  mutate(date = as.Date(timestamp),
+         Eaten_whole = case_when(
+           Eaten_whole %in% c("Eaten", "eaten") ~ "Eaten",
+           Eaten_whole %in% c("Whole", "whole") ~ "Intact",
+           Eaten_whole %in% c("Semi", "semi")   ~ "Partially eaten")) %>%
+  filter(!is.na(Eaten_whole)) %>%
+  mutate(Eaten_whole = factor(Eaten_whole, levels = c("Intact", "Partially eaten", "Eaten")),
+         grazing_num = as.numeric(Eaten_whole),
+         sample = as.factor(sample))
+
+table(grazing_status$sample, grazing_status$Eaten_whole)
+```
+
+```{r grazing models}
+# as published - grazing status against substrate roughness at the plant
+gam_grazing_rough <- gam(grazing_num ~ s(rvalue_1, bs = "tp", k = 5) + sample,
+                         family = ocat(R = 3), data = grazing_status, method = "REML")
+
+# against distance from the nearest structurally complex reef
+gam_grazing_dist <- gam(grazing_num ~ s(dist_complex_reef, bs = "tp", k = 5) + sample,
+                        family = ocat(R = 3), data = grazing_status, method = "REML")
+
+gam_grazing_both <- gam(grazing_num ~ s(dist_complex_reef, bs = "tp", k = 5) +
+                          s(rvalue_1, bs = "tp", k = 5) + sample,
+                        family = ocat(R = 3), data = grazing_status, method = "REML")
+
+gam_grazing_null <- gam(grazing_num ~ sample, family = ocat(R = 3),
+                        data = grazing_status, method = "REML")
+
+summary(gam_grazing_rough)
+summary(gam_grazing_dist)
+summary(gam_grazing_both)
+AIC(gam_grazing_null, gam_grazing_rough, gam_grazing_dist, gam_grazing_both)
+```
+
+```{r spatial autocorrelation}
+# plants were photographed about a metre apart, so neighbours are unlikely to be
+# independent. Order them along each transect and check the residual correlation.
+grazing_status <- grazing_status %>%
+  group_by(sample) %>%
+  mutate(order = rank(as.POSIXct(timestamp, format = "%Y-%m-%dT%H:%M:%S"), ties.method = "first")) %>%
+  ungroup()
+
+res <- residuals(gam_grazing_dist, type = "response")
+for (sm in levels(grazing_status$sample)) {
+  rr <- res[grazing_status$sample == sm][order(grazing_status$order[grazing_status$sample == sm])]
+  cat(sprintf("transect %s: lag-1 residual autocorrelation r = %.3f (n = %d)\n",
+              sm, cor(rr[-length(rr)], rr[-1]), length(rr)))
+}
+
+# thin the transects to increase the spacing between retained plants, and check that
+# the distance effect survives
+for (k in c(1, 2, 3, 5)) {
+  sub <- grazing_status %>% filter(order %% k == 0 | k == 1)
+  mk  <- gam(grazing_num ~ s(dist_complex_reef, bs = "tp", k = 5) + sample,
+             family = ocat(R = 3), data = sub, method = "REML")
+  st  <- summary(mk)$s.table
+  cat(sprintf("every %d plant: n = %3d  edf = %.2f  chi2 = %5.1f  p = %.3g  dev.expl = %.1f%%\n",
+              k, nrow(sub), st[1, "edf"], st[1, "Chi.sq"], st[1, "p-value"], 100 * summary(mk)$dev.expl))
+}
+```
+
+```{r each transect separately}
+# only two transects, so fit each one on its own and see whether the gradient is in both
+for (s in levels(grazing_status$sample)) {
+  sub <- grazing_status %>% filter(sample == s)
+  m   <- gam(grazing_num ~ s(dist_complex_reef, bs = "tp", k = 5),
+             family = ocat(R = 3), data = sub, method = "REML")
+  st  <- summary(m)$s.table
+  cat(sprintf("transect %s: n = %3d  range %.1f-%.1f m  edf = %.2f  chi2 = %5.1f  p = %.3g  dev.expl = %.1f%%\n",
+              s, nrow(sub), min(sub$dist_complex_reef), max(sub$dist_complex_reef),
+              st[1, "edf"], st[1, "Chi.sq"], st[1, "p-value"], 100 * summary(m)$dev.expl))
+  print(round(tapply(sub$dist_complex_reef, sub$Eaten_whole, mean), 1))
+}
+```
+
+```{r block bootstrap}
+# with two transects and neighbouring plants a metre apart, the p-value from 256 rows is
+# optimistic. Resample blocks of consecutive plants instead, so the bootstrap keeps the
+# autocorrelation rather than breaking it, and report the effect as a probability difference.
+pred_diff <- function(d) {
+  m <- try(gam(grazing_num ~ s(dist_complex_reef, bs = "tp", k = 5) + sample,
+               family = ocat(R = 3), data = d, method = "REML"), silent = TRUE)
+  if (inherits(m, "try-error")) return(NA_real_)
+  nd <- data.frame(dist_complex_reef = c(15, 45),
+                   sample = factor(levels(grazing_status$sample)[1],
+                                   levels = levels(grazing_status$sample)))
+  p <- predict(m, newdata = nd, type = "response")
+  p[1, 3] - p[2, 3]   # P(eaten) at 15 m minus P(eaten) at 45 m
+}
+
+grazing_ordered <- grazing_status %>% arrange(sample, order)
+obs_diff <- pred_diff(grazing_ordered)
+
+set.seed(42)
+block_len <- 15
+n_boot    <- 400
+boot <- replicate(n_boot, {
+  resampled <- lapply(levels(grazing_ordered$sample), function(s) {
+    sub    <- grazing_ordered %>% filter(sample == s)
+    n      <- nrow(sub)
+    starts <- sample(seq_len(n - block_len + 1), ceiling(n / block_len), replace = TRUE)
+    idx    <- unlist(lapply(starts, function(st) st:(st + block_len - 1)))[1:n]
+    sub[idx, ]
+  })
+  suppressWarnings(pred_diff(bind_rows(resampled)))
+})
+boot <- boot[is.finite(boot)]
+
+cat(sprintf("P(eaten | 15 m) - P(eaten | 45 m) = %.3f\n", obs_diff))
+cat(sprintf("block bootstrap (%d plants per block, %d valid resamples): 95%% CI %.3f - %.3f\n",
+            block_len, length(boot), quantile(boot, 0.025), quantile(boot, 0.975)))
+cat(sprintf("resamples with a positive effect: %.0f%%\n", 100 * mean(boot > 0)))
+```
+
+```{r grazing summary}
+grazing_summary <- grazing_status %>%
+  group_by(Eaten_whole) %>%
+  summarise(n = n(),
+            dist_mean = mean(dist_complex_reef), dist_sd = sd(dist_complex_reef),
+            dist_median = median(dist_complex_reef),
+            rough_mean = mean(rvalue_1))
+
+as.data.frame(grazing_summary)
+
+# same thing within each transect, to show the gradient is not driven by one of them
+grazing_status %>%
+  group_by(sample, Eaten_whole) %>%
+  summarise(n = n(), dist_median = median(dist_complex_reef), .groups = "drop") %>%
+  as.data.frame()
+```
+
+```{r species specific height model}
+# height of each photographed plant against the roughness under it, per species
+height_species <- grazing_status %>%
+  filter(!is.na(rvalue_1)) %>%
+  mutate(algae_type = factor(algae_type))
+
+gam_height_species <- gam(height_cm ~ algae_type + s(rvalue_1, by = algae_type, bs = "tp", k = 5) + sample,
+                          data = height_species, method = "REML")
+gam_height_species_null <- gam(height_cm ~ algae_type + sample,
+                               data = height_species, method = "REML")
+
+summary(gam_height_species)
+AIC(gam_height_species_null, gam_height_species)
+anova(gam_height_species_null, gam_height_species, test = "F")
+```
+
+```{r figure 8a}
+# Figure 8 uses larger text than the other figures so it stays legible at page width
+theme_big <- theme_bw(base_size = 22) +
+  theme(axis.title.x = element_text(margin = margin(t = 12)),
+        axis.title.y = element_text(margin = margin(r = 12)),
+        axis.text  = element_text(size = 19, colour = "black"),
+        axis.line  = element_line(colour = "black", linewidth = 0.5),
+        axis.ticks = element_line(colour = "black", linewidth = 0.5),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_line(colour = "grey85", linewidth = 0.5))
+legend_big <- function(x, y) legend_inside(x, y) +
+  theme(legend.title = element_text(size = 19), legend.text = element_text(size = 17))
+
+# one grid per species, over that species' own roughness range - Sargassum only reaches
+# about 1.7 degrees, so a shared grid drew its trend line far beyond where it has data
+nd_sp <- do.call(rbind, lapply(levels(height_species$algae_type), function(sp) {
+  rng <- range(height_species$rvalue_1[height_species$algae_type == sp], na.rm = TRUE)
+  data.frame(
+    rvalue_1   = seq(rng[1], rng[2], length.out = 200),
+    algae_type = factor(sp, levels = levels(height_species$algae_type)),
+    sample     = factor(levels(height_species$sample)[1], levels = levels(height_species$sample))
+  )
+}))
+pr_sp <- predict(gam_height_species, newdata = nd_sp, se.fit = TRUE)
+nd_sp$fit <- pr_sp$fit
+nd_sp$lwr <- pr_sp$fit - 1.96 * pr_sp$se.fit
+nd_sp$upr <- pr_sp$fit + 1.96 * pr_sp$se.fit
+
+p8a <- ggplot(height_species, aes(x = rvalue_1, y = height_cm,
+                                  color = algae_type, fill = algae_type)) +
+  geom_point(size = 2.8, alpha = 0.5) +
+  geom_ribbon(data = nd_sp, aes(y = fit, ymin = lwr, ymax = upr), alpha = 0.18, color = NA) +
+  geom_line(data = nd_sp, aes(y = fit), linewidth = 1.9) +
+  annotate("text", x = -Inf, y = Inf, label = gam_label(gam_height_species),
+           hjust = -0.08, vjust = 1.15, size = 6, lineheight = 0.95, color = "black") +
+  scale_color_manual(values = algae_cols, name = "Algae type") +
+  scale_fill_manual(values  = algae_cols, name = "Algae type") +
+  labs(x = "Substrate roughness (°)", y = "Algal height (cm)") +
+  theme_big +
+  legend_big(0.83, 0.62)
+
+p8a
+
+```
+
+```{r figure 8b}
+# probability of each grazing status along the distance gradient
+# The last partially eaten plant sits at 39.0 m and the last eaten one at 31.1 m; beyond
+# that every observation is intact, so the ordinal transition is extrapolated and the
+# interval widens without bound. Draw the curve over the supported range instead.
+dist_max <- 70
+
+nd_d <- data.frame(
+  dist_complex_reef = seq(min(grazing_status$dist_complex_reef, na.rm = TRUE),
+                          min(max(grazing_status$dist_complex_reef, na.rm = TRUE), dist_max),
+                          length.out = 200),
+  sample = factor(levels(grazing_status$sample)[1], levels = levels(grazing_status$sample))
+)
+
+fit_p <- predict(gam_grazing_dist, newdata = nd_d, type = "response")
+
+# 95% intervals by simulating from the coefficients, as before. ocat works on a latent
+# scale, so the cut points are what turn a simulated draw into a probability per category
+cuts <- c(-Inf, gam_grazing_dist$family$getTheta(TRUE), Inf)
+set.seed(1)
+Xp   <- predict(gam_grazing_dist, newdata = nd_d, type = "lpmatrix")
+beta <- rmvn(1000, coef(gam_grazing_dist), vcov(gam_grazing_dist))
+sim  <- Xp %*% t(beta)
+
+pred_ci <- do.call(rbind, lapply(seq_along(levels(grazing_status$Eaten_whole)), function(i) {
+  p_sim <- plogis(cuts[i + 1] - sim) - plogis(cuts[i] - sim)
+  data.frame(
+    dist_complex_reef = nd_d$dist_complex_reef,
+    status = factor(levels(grazing_status$Eaten_whole)[i],
+                    levels = levels(grazing_status$Eaten_whole)),
+    fit = fit_p[, i],
+    lwr = apply(p_sim, 1, quantile, 0.025),
+    upr = apply(p_sim, 1, quantile, 0.975))
+}))
+
+p8b <- ggplot(pred_ci, aes(x = dist_complex_reef, y = fit, color = status, fill = status)) +
+  geom_ribbon(aes(ymin = lwr, ymax = upr), alpha = 0.18, color = NA) +
+  geom_line(linewidth = 1.9) +
+  annotate("text", x = -Inf, y = Inf, label = gam_label(gam_grazing_dist),
+           hjust = -0.08, vjust = 1.15, size = 6, lineheight = 0.95, color = "black") +
+  # default ggplot hue palette, as in the originally submitted figure - keeps this panel
+  # visually distinct from the algae colours in 8a
+  scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1)) +
+  labs(x = "Distance from complex reef (m)", y = "Probability of grazing status",
+       color = "Grazing status", fill = "Grazing status") +
+  theme_big +
+  legend_big(0.79, 0.46)
+
+p8b
+
+```
+
+```{r figure 8}
+tag8 <- theme(plot.tag = element_text(size = 26, face = "bold"))
+fig8 <- (p8a + labs(tag = "a") + tag8) | (p8b + labs(tag = "b") + tag8)
+fig8
+ggsave(file.path(fig_dir, "Fig8_height_and_grazing.png"), fig8, width = 16, height = 6.5, dpi = 400)
+```
+
+
+# 3. Translocation experiments
+
+The camera station is the experimental unit. Grazing outcomes were scored from the video
+at each station and are reported descriptively (controls were deployed on one date only
+in the main experiment, so a formal test of grazing outcome is not appropriate).
+
+```{r translocation}
+# stations per date and treatment in the video data
+seascape_experiments %>%
+  filter(!is.na(Treatment) & Treatment != "") %>%
+  distinct(Date, Treatment, Camera_ID) %>%
+  count(Date, Treatment)
+
+# grazing outcome per station, scored from the videos (as reported in the manuscript)
+grazing_outcome <- tibble::tribble(
+  ~experiment,               ~treatment,     ~stations, ~grazed,
+  "Pilot, June 2024 (2 h)",  "Translocated",  4,         1,
+  "Pilot, June 2024 (2 h)",  "Control",       2,         0,
+  "Main, April 2025 (6 h)",  "Translocated",  5,         5,
+  "Main, April 2025 (6 h)",  "Control",       2,         0)
+grazing_outcome
+```
+
+```{r maxn by guild}
+# functional groups, as in the original figure
+fg_lookup <- c(
+  "Caranx.crysos" = "Piscivores", "Dentex.dentex" = "Piscivores",
+  "Diplodus.cervinus" = "Omnivores", "Diplodus.sargus" = "Omnivores",
+  "Diplodus.vulgaris" = "Omnivores", "Epinephelus.costae" = "Piscivores",
+  "Epinephelus.marginatus" = "Piscivores", "Fistularia.sp." = "Piscivores",
+  "Lagocephalus.spadiceus" = "Piscivores", "Mugilidae" = "Omnivores",
+  "Oblada.melanura" = "Omnivores", "Parupeneus.forsskali" = "Invertivores",
+  "Pempheris.rhomboidea" = "Planktivores", "Siganus sp." = "Herbivores",
+  "Siganus.sp." = "Herbivores", "Sparus.aurata" = "Omnivores",
+  "Sphyraena.sp" = "Piscivores", "Symphodus tinca" = "Invertivores",
+  "Thalassoma.pavo" = "Invertivores", "Torquigener.flavimaculosus" = "Invertivores")
+
+maxn_experiments$functional_group <- fg_lookup[maxn_experiments$Species]
+maxn_experiments$functional_group[is.na(maxn_experiments$functional_group)] <- "Other"
+
+fg_obs <- maxn_experiments %>%
+  filter(!is.na(Treatment), Treatment != "") %>%
+  mutate(sample_id = paste(Date, Camera_ID, sep = "_")) %>%
+  group_by(sample_id, Date, Treatment, functional_group) %>%
+  summarise(total_maxn = sum(Max_n, na.rm = TRUE), .groups = "drop") %>%
+  filter(!functional_group %in% c("Other", "Planktivores"))
+
+# every deployment gets a value for every guild: a guild never seen on a video is MaxN = 0
+deployments <- distinct(fg_obs, sample_id, Date, Treatment)
+fg_sum <- tidyr::expand_grid(deployments,
+                             functional_group = c("Herbivores", "Invertivores", "Omnivores", "Piscivores")) %>%
+  left_join(fg_obs, by = c("sample_id", "Date", "Treatment", "functional_group")) %>%
+  mutate(total_maxn = coalesce(total_maxn, 0))
+
+count(deployments, Date, Treatment)
+
+# exact two-sided permutation test: treatment labels are shuffled only among stations
+# deployed on the same date (all 90 possible permutations)
+perm_test <- function(d) {
+  diff_means <- function(ctl) mean(d$total_maxn[-ctl]) - mean(d$total_maxn[ctl])
+  obs  <- diff_means(which(d$Treatment == "Control"))
+  byd  <- split(seq_len(nrow(d)), d$Date)
+  opts <- lapply(byd, function(ix) combn(ix, sum(d$Treatment[ix] == "Control"), simplify = FALSE))
+  grid <- expand.grid(lapply(opts, seq_along))
+  stat <- apply(grid, 1, function(r) diff_means(unlist(Map(function(o, i) o[[i]], opts, r))))
+  c(n_permutations = nrow(grid), p_value = mean(abs(stat) >= abs(obs) - 1e-9))
+}
+maxn_perm <- sapply(split(fg_sum, fg_sum$functional_group), perm_test)
+round(maxn_perm, 3)
+```
+
+```{r figure 10}
+guild_cols <- c(Herbivores = "#F8766D", Invertivores = "#7CAE00",
+                Omnivores = "#00BFC4", Piscivores = "#C77CFF")
+p_lab <- setNames(paste0("p = ", formatC(maxn_perm["p_value", ], digits = 2, format = "fg", flag = "#")),
+                  colnames(maxn_perm))
+p_lab["Herbivores"] <- paste0("p = ", formatC(maxn_perm["p_value", "Herbivores"], digits = 3, format = "f"))
+
+theme_fig10 <- theme_bw(base_size = 22) +
+  theme(axis.text = element_text(size = 19, colour = "black"),
+        axis.ticks = element_line(colour = "black"), axis.line = element_line(colour = "black"),
+        panel.grid.minor = element_blank(), panel.grid.major = element_line(colour = "grey85"),
+        strip.background = element_rect(fill = "grey95", colour = "grey20"),
+        strip.text = element_text(size = 21, face = "bold", margin = margin(6, 0, 6, 0)),
+        plot.tag = element_text(size = 28, face = "bold"), legend.position = "none")
+
+guild_panel <- function(g, tag) {
+  d <- fg_sum %>% filter(functional_group == g) %>%
+    mutate(Treatment = factor(Treatment, levels = c("Control", "Translocated")))
+  ggplot(d, aes(Treatment, total_maxn)) +
+    geom_boxplot(fill = guild_cols[g], alpha = 0.85, width = 0.6, outlier.shape = NA,
+                 linewidth = 0.7, colour = "black") +
+    geom_jitter(width = 0.1, height = 0, size = 3.2, alpha = 0.65, colour = "grey10") +
+    annotate("text", x = 1.5, y = max(d$total_maxn) * 1.12, label = p_lab[g], size = 7,
+             fontface = if (g == "Herbivores") "bold" else "plain") +
+    facet_wrap(~ functional_group) +
+    scale_y_continuous(expand = expansion(mult = c(0.04, 0.12))) +
+    labs(x = NULL, y = NULL, tag = tag) + theme_fig10
+}
+
+fig10 <- wrap_plots(guild_panel("Herbivores", "a"), guild_panel("Invertivores", "b"),
+                    guild_panel("Omnivores", "c"), guild_panel("Piscivores", "d"), ncol = 2)
+fig10 <- wrap_elements(fig10) + labs(tag = "MaxN per deployment") +
+  theme(plot.tag = element_text(size = 22, angle = 90), plot.tag.position = "left")
+fig10
+ggsave(file.path(fig_dir, "Fig10_maxn_by_guild.png"), fig10, width = 11, height = 10, dpi = 400)
+```
+
+
+
+# 4. Session info
+
+```{r session}
+sessionInfo()
+```
